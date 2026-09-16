@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+!.env.example
+config/local.*
+config/private/
+.local/
+secrets/
+credentials/
+campaigns/
+artifacts/
+runtime/
+logs/
+__pycache__/
+*.pyc
+*.log
+.DS_Store

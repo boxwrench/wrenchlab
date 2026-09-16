@@ -1,0 +1,17 @@
+{
+  "author_host": {
+    "host_id": "workstation",
+    "transport": "local",
+    "capabilities": ["author"]
+  },
+  "executor_host": {
+    "host_id": "accelerator-worker",
+    "transport": "ssh",
+    "host": "worker-01",
+    "capabilities": ["cpu", "gpu", "rocm"]
+  },
+  "requirements": {
+    "capabilities": ["gpu"],
+    "resources": {"gpu": {"exclusive": true}}
+  }
+}

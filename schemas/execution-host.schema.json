@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WrenchLab static execution host v2",
+  "description": "Runtime validation additionally enforces safe paths, supported environment keys, resource/service references and immutable hashes. See scripts/execution_hosts.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "worker_id", "host_id", "transport", "root", "resource_root", "capabilities", "capability_evidence", "resources", "managed_services"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "worker_id": {"$ref": "#/$defs/id"},
+    "host_id": {"$ref": "#/$defs/id"},
+    "transport": {"enum": ["local", "ssh"]},
+    "host": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"},
+    "root": {"type": "string", "pattern": "^/"},
+    "resource_root": {"type": "string", "pattern": "^/"},
+    "capabilities": {"$ref": "#/$defs/capabilities"},
+    "capability_evidence": {
+      "type": "object", "additionalProperties": false, "required": ["verified_at", "description"],
+      "properties": {"verified_at": {"type": "integer", "minimum": 1}, "description": {"type": "string", "minLength": 1, "maxLength": 4096}}
+    },
+    "resources": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"gpu": {
+        "type": "object", "additionalProperties": false,
+        "required": ["resource_id", "capabilities", "probe", "environment"],
+        "properties": {
+          "resource_id": {"type": "string", "pattern": "^gpu:[A-Za-z0-9_-]{1,64}$"},
+          "capabilities": {"$ref": "#/$defs/capabilities"},
+          "probe": {"$ref": "#/$defs/argv"},
+          "environment": {"type": "object", "additionalProperties": false, "properties": {
+            "HIP_VISIBLE_DEVICES": {"type": "string"}, "ROCR_VISIBLE_DEVICES": {"type": "string"}, "LD_LIBRARY_PATH": {"type": "string"}
+          }}
+        }
+      }}
+    },
+    "managed_services": {
+      "type": "object", "maxProperties": 8, "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false,
+        "required": ["unit", "conflicts_with", "health", "expects_owner"],
+        "properties": {
+          "unit": {"type": "string", "pattern": "^[A-Za-z0-9_.@-]+\\.service$"},
+          "conflicts_with": {"type": "array", "items": {"type": "string"}},
+          "health": {"$ref": "#/$defs/argv"}, "expects_owner": {"type": "boolean"}
+        }
+      }
+    },
+    "runtimes": {
+      "type": "object", "maxProperties": 16, "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"type": "object", "additionalProperties": false, "required": ["launcher"],
+        "properties": {"launcher": {"$ref": "#/$defs/argv"}}}
+    }
+  },
+  "allOf": [{"if": {"properties": {"transport": {"const": "ssh"}}}, "then": {"required": ["host"]}, "else": {"not": {"required": ["host"]}}}],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$"},
+    "capabilities": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "argv": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}, "prefixItems": [{"type": "string", "pattern": "^/"}]},
+    "requirements": {
+      "type": "object", "additionalProperties": false, "required": ["capabilities", "resources"],
+      "properties": {
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "resources": {"type": "object", "additionalProperties": false, "properties": {
+          "gpu": {"type": "object", "additionalProperties": false, "required": ["exclusive"], "properties": {"exclusive": {"const": true}}}
+        }}
+      }
+    }
+  }
+}

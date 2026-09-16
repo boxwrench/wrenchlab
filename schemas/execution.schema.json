@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wrenchlab.dev/schemas/execution-v1",
+  "title": "WrenchLab CPU execution protocol v1",
+  "description": "Epoch-millisecond integers; exact Git bundle input; no patches or GPU resources in v1. Runtime validation lives in execution_protocol.py and job-evidence.mjs.",
+  "oneOf": [
+    { "$ref": "#/$defs/flow" },
+    { "$ref": "#/$defs/jobRequest" },
+    { "$ref": "#/$defs/jobResult" },
+    { "$ref": "#/$defs/workerConfig" }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$" },
+    "time": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "relativePath": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.\\.?|\\.git)(?:/|$))(?!.*//)(?!.*[\\\\\\u0000-\\u001f]).*(?<!/)$" },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commit", "bundle_sha256"],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+        "bundle_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "workerConfig": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "worker_id", "host", "root"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "worker_id": { "$ref": "#/$defs/id" },
+        "host": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$" },
+        "root": { "type": "string", "pattern": "^/", "description": "Dedicated absolute directory, no symlink ancestors or traversal; checked at deployment." }
+      }
+    },
+    "flow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "flow_id", "campaign_id", "created_at", "deadline", "owner", "objective", "state", "max_jobs", "worker", "jobs"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "flow_id": { "$ref": "#/$defs/id" },
+        "campaign_id": { "$ref": "#/$defs/id" },
+        "created_at": { "$ref": "#/$defs/time" },
+        "deadline": { "$ref": "#/$defs/time" },
+        "owner": { "type": "string", "minLength": 1 },
+        "objective": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["OPEN", "CLOSED"] },
+        "max_jobs": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "worker": { "$ref": "#/$defs/workerConfig" },
+        "jobs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "type": "object" } }
+      }
+    },
+    "jobRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "job_id", "flow_id", "worker_id", "source", "command", "timeout_ms", "deadline", "resource", "artifacts", "created_at"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "job_id": { "$ref": "#/$defs/id" },
+        "flow_id": { "$ref": "#/$defs/id" },
+        "worker_id": { "$ref": "#/$defs/id" },
+        "source": { "$ref": "#/$defs/source" },
+        "command": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string" }, "description": "argv, no implicit shell; total <=8192 characters, first item nonempty, no NUL." },
+        "timeout_ms": { "type": "integer", "minimum": 50, "maximum": 3600000 },
+        "deadline": { "$ref": "#/$defs/time" },
+        "created_at": { "$ref": "#/$defs/time" },
+        "resource": { "const": "cpu" },
+        "artifacts": { "type": "array", "maxItems": 16, "items": {
+          "type": "object", "additionalProperties": false, "required": ["path", "required"],
+          "properties": { "path": { "$ref": "#/$defs/relativePath" }, "required": { "type": "boolean" }, "sha256": { "$ref": "#/$defs/sha256" } }
+        } }
+      }
+    },
+    "jobResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "job_id", "flow_id", "request_hash", "source", "command", "worker", "environment", "started_at", "ended_at", "execution", "exit_code", "cleanup", "artifacts", "evidence_errors", "error"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "job_id": { "$ref": "#/$defs/id" }, "flow_id": { "$ref": "#/$defs/id" },
+        "request_hash": { "$ref": "#/$defs/sha256" }, "source": { "$ref": "#/$defs/source" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "worker": { "type": "object", "required": ["worker_id", "hostname", "boot_id", "root", "implementation_sha256"], "properties": {
+          "worker_id": { "$ref": "#/$defs/id" }, "hostname": { "type": "string" }, "boot_id": { "type": "string" },
+          "root": { "type": "string" }, "implementation_sha256": { "$ref": "#/$defs/sha256" }
+        } },
+        "environment": { "type": "object", "required": ["system", "release", "machine", "python", "git", "inherited_environment"] },
+        "started_at": { "$ref": "#/$defs/time" }, "ended_at": { "$ref": "#/$defs/time" },
+        "execution": { "enum": ["success", "failed", "timeout", "cancelled"] },
+        "exit_code": { "type": ["integer", "null"] },
+        "cleanup": { "enum": ["verified", "failed", "unknown"] },
+        "artifacts": { "type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["path", "bytes", "sha256"],
+          "properties": { "path": { "$ref": "#/$defs/relativePath" }, "bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 }, "sha256": { "$ref": "#/$defs/sha256" } }
+        } },
+        "evidence_errors": { "type": "array", "items": { "type": "string" } },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "workerStatus": { "enum": ["AVAILABLE", "BUSY", "RECOVERING", "QUARANTINED"] },
+    "jobState": { "enum": ["QUEUED", "RUNNING", "CLEANING", "TERMINAL"] }
+  }
+}

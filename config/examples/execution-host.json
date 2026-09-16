@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "worker_id": "example-worker",
+  "host_id": "accelerator-worker",
+  "transport": "ssh",
+  "host": "worker-01",
+  "root": "/home/user/wrenchlab-worker",
+  "resource_root": "/home/user/wrenchlab-resources",
+  "capabilities": ["cpu", "gpu", "rocm"],
+  "capability_evidence": {
+    "verified_at": 1,
+    "description": "Example configuration; verify capabilities on the target host"
+  },
+  "runtimes": {
+    "python": {"launcher": ["/usr/bin/python3"]}
+  },
+  "resources": {
+    "gpu": {
+      "resource_id": "gpu:primary",
+      "capabilities": ["gpu", "rocm"],
+      "probe": ["/usr/bin/true"],
+      "environment": {}
+    }
+  },
+  "managed_services": {}
+}
