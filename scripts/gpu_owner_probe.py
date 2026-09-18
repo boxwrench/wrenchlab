@@ -40,7 +40,7 @@ def probe(rocminfo, expected):
         identity['cgroup'] = Path(f"/proc/{identity['pid']}/cgroup").read_text()
         identity['executable'] = str(Path(f"/proc/{identity['pid']}/exe").readlink())
         owners.append(identity)
-    return {'complete': True, 'owners': owners, 'capabilities': ['rocm', expected],
+    return {'complete': True, 'owners': owners, 'capabilities': ['gpu', 'rocm', expected],
             'environment': {'rocminfo': rocminfo, 'targets': targets,
                             'rocminfo_sha256': __import__('hashlib').sha256(info.encode()).hexdigest()}}
 

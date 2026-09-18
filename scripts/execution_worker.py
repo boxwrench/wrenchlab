@@ -197,8 +197,11 @@ def execute(root, jid):
         signal.signal(sig, stop)
     # Avoid forwarding login/session secrets to either git or the command.
     env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(folder), 'LANG': 'C.UTF-8',
-           'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
-           'CUDA_VISIBLE_DEVICES': '', 'HIP_VISIBLE_DEVICES': '', 'ROCR_VISIBLE_DEVICES': ''}
+           'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+    # GPU visibility is governed by the resource reservation (exclusive
+    # acquire + owner observation), not by device-hiding variables. An
+    # empty HIP_VISIBLE_DEVICES actively hides every AMD device from
+    # ROCm torch, so it must never be set, even to ''.
     os.environ.clear()
     os.environ.update(env)
     started = job['started_at']
