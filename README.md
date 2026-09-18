@@ -55,3 +55,19 @@ Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 The public bootstrap classification is in
 [`reports/BOOTSTRAP.md`](reports/BOOTSTRAP.md), with accepted private-foundation
 results summarized in [`reports/QUALIFICATION_SUMMARY.md`](reports/QUALIFICATION_SUMMARY.md).
+
+## License and attribution
+
+WrenchLab is licensed under the [MIT License](LICENSE).
+
+The MIT License permits use, copying, modification, distribution, sublicensing
+and sale of the software, provided that the copyright notice and MIT permission
+notice are included in all copies or substantial portions of the software.
+
+When redistributing WrenchLab or a substantial portion of it, retain:
+
+```text
+Copyright (c) 2026 boxwrench
+```
+
+and the full MIT license notice in [`LICENSE`](LICENSE).
