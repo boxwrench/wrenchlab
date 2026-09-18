@@ -148,6 +148,85 @@ class ResourceLifecycle(ExecutionTests):
             with self.assertRaisesRegex(RuntimeError, 'unambiguous'):
                     probe('/fake/rocminfo', 'gfx0000')
 
+    def test_selected_gpu_owner_filter(self):
+        # Per-GPU ownership: only queues on the selected topology node block.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import subprocess
+        from gpu_owner_probe import probe
+        output = '  Name: gfx1201\n'
+        run = subprocess.CompletedProcess([], 0, output, '')
+        # Topology: node 7 is gfx1201 (gpuid 2277), node 9 is gfx1100 (gpuid 23276).
+        topo = {'7': 120001, '9': 110000}
+        gpuids = {'7': 2277, '9': 23276}
+        def identity(pid):
+            return {'pid': pid, 'state': 'S', 'ppid': 1, 'pgid': 1, 'ticks': '1', 'boot_id': 'b'}
+        def entries(*args):
+            return [SimpleNamespace(name='101', exists=lambda: True),
+                    SimpleNamespace(name='202', exists=lambda: True)]
+        def ctx(queue_side_effect):
+            return (patch('gpu_owner_probe.subprocess.run', return_value=run),
+                    patch('gpu_owner_probe._topology_target_map', return_value=dict(topo)),
+                    patch('gpu_owner_probe._node_gpuid', side_effect=lambda n: gpuids[n]),
+                    patch('gpu_owner_probe.proc_info', side_effect=identity),
+                    patch('gpu_owner_probe._proc_entries', side_effect=entries),
+                    patch('pathlib.Path.read_text', return_value='x'),
+                    patch('pathlib.Path.readlink', return_value='/bin/true'),
+                    patch('gpu_owner_probe._owner_queue_gpuids', side_effect=queue_side_effect))
+        patches = ctx(lambda pid: {2277} if pid == 101 else {23276})
+        for p in patches:
+            p.start()
+        try:
+            result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual([o['pid'] for o in result['owners']], [101])
+        self.assertEqual([o['pid'] for o in result['other_gpu_owners']], [202])
+        self.assertEqual(result['environment']['selected_gpuid'], 2277)
+        # Owner on both GPUs still blocks.
+        patches = ctx(lambda pid: {2277, 23276})
+        for p in patches:
+            p.start()
+        try:
+            result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(sorted(o['pid'] for o in result['owners']), [101, 202])
+        self.assertEqual(result['other_gpu_owners'], [])
+        # No owners passes with empty lists.
+        patches = ctx(lambda pid: {2277})
+        for p in patches:
+            p.start()
+        try:
+            with patch('gpu_owner_probe._proc_entries', return_value=[]):
+                result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(result['owners'], [])
+        self.assertEqual(result['other_gpu_owners'], [])
+        # Ambiguous topology mapping fails closed.
+        with patch('gpu_owner_probe.subprocess.run', return_value=run), \
+             patch('gpu_owner_probe._topology_target_map', return_value={'7': 120001, '8': 120001}):
+            with self.assertRaisesRegex(RuntimeError, 'ambiguously'):
+                probe('/fake/rocminfo', 'gfx1201')
+        # Unreadable queue data fails closed, never reads as absent.
+        patches = ctx(RuntimeError('KFD queue data incomplete for owner: 101'))
+        for p in patches:
+            if 'queue_gpuids' not in str(p):
+                p.start()
+        started = [p for p in patches if 'queue_gpuids' not in str(p)]
+        try:
+            with patch('gpu_owner_probe._owner_queue_gpuids',
+                       side_effect=RuntimeError('KFD queue data incomplete for owner: 101')):
+                with self.assertRaisesRegex(RuntimeError, 'queue data'):
+                    probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in started:
+                p.stop()
+
     def test_cross_worker_exclusive_admission(self):
         self.prepare('sleep'); self.broker.action('submit', 'job-a'); self.wait(command=True)
         config = copy.deepcopy(self.config)

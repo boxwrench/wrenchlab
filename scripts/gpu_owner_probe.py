@@ -3,18 +3,122 @@
 KFD enumerates compute clients across users. Missing visibility is an error, not
 an empty owner list. Render-only desktop clients are not compute reservations.
 This does not isolate display activity; measurement isolation remains a policy.
+
+On multi-GPU hosts, ownership is filtered to the selected GPU node: an owner
+counts against the resource only when it holds KFD queues on the topology node
+matching the expected gfx target. Owners attached solely to other GPUs are
+reported as other_gpu_owners for diagnostics and do not block acquisition.
 """
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 from execution_worker import proc_info
 
 
+def _topology_target_map():
+    """Map KFD node directory to integer gfx target version.
+
+    Raises RuntimeError when topology data is missing or contradictory,
+    so callers stay fail-closed instead of guessing.
+    """
+    nodes = Path('/sys/class/kfd/kfd/topology/nodes')
+    if not nodes.is_dir():
+        raise RuntimeError('KFD topology unavailable')
+    mapping = {}
+    for node in nodes.iterdir():
+        if not node.name.isdigit():
+            continue
+        props = node / 'properties'
+        try:
+            text = props.read_text()
+        except OSError:
+            raise RuntimeError('KFD topology properties unreadable: ' + node.name)
+        match = re.search(r'^gfx_target_version\s+(\d+)\s*$', text, re.MULTILINE)
+        if not match:
+            raise RuntimeError('KFD topology target missing: ' + node.name)
+        version = int(match.group(1))
+        if version in mapping:
+            raise RuntimeError('KFD topology target ambiguous: ' + str(version))
+        mapping[node.name] = version
+    if not mapping:
+        raise RuntimeError('KFD topology has no GPU nodes')
+    return mapping
+
+
+def _expected_version(expected):
+    """Convert an expected gfx name (e.g. gfx1201) to its topology version int.
+
+    gfx_target_version encodes major/minor/stepping in decimal digits:
+    gfx1201 -> 120001, gfx1100 -> 110000, gfx1151 -> 110501, gfx1036 -> 100306.
+    The trailing two digits split into minor (first) and stepping (second):
+    version = major * 10000 + minor * 100 + stepping.
+    """
+    match = re.fullmatch(r'gfx(\d+)', expected)
+    if not match:
+        raise RuntimeError('unmappable expected GPU target: ' + expected)
+    digits = match.group(1)
+    if len(digits) < 3:
+        raise RuntimeError('unmappable expected GPU target: ' + expected)
+    major = int(digits[:-2])
+    minor = int(digits[-2])
+    stepping = int(digits[-1])
+    return major * 10000 + minor * 100 + stepping
+
+
+def _owner_queue_gpuids(pid):
+    """Return the set of KFD queue gpuids held by a PID.
+
+    Raises RuntimeError when queue data is missing or contradictory, so an
+    owner whose attachment cannot be proven never reads as absent.
+    """
+    queues = Path(f'/sys/class/kfd/kfd/proc/{pid}/queues')
+    if not queues.is_dir():
+        raise RuntimeError(f'KFD queue data unavailable for owner: {pid}')
+    gpuids = set()
+    seen = False
+    for queue in queues.iterdir():
+        gpuid_file = queue / 'gpuid'
+        if not gpuid_file.is_file():
+            continue
+        seen = True
+        try:
+            gpuids.add(int(gpuid_file.read_text().strip()))
+        except (OSError, ValueError):
+            raise RuntimeError(f'KFD queue gpuid unreadable for owner: {pid}')
+    if not seen or not gpuids:
+        raise RuntimeError(f'KFD queue data incomplete for owner: {pid}')
+    return gpuids
+
+
+def _selected_node(topology, expected):
+    """Return the single topology node matching the expected target version."""
+    want = _expected_version(expected)
+    hits = [node for node, version in topology.items() if version == want]
+    if len(hits) != 1:
+        raise RuntimeError('expected GPU target maps ambiguously in KFD topology: ' + expected)
+    return hits[0]
+
+
+def _node_gpuid(node):
+    """Return the KFD gpuid for a topology node directory name."""
+    try:
+        return int((Path('/sys/class/kfd/kfd/topology/nodes') / node / 'gpu_id').read_text().strip())
+    except (OSError, ValueError):
+        raise RuntimeError('KFD topology gpu_id unreadable: ' + node)
+
+
+def _proc_entries(root):
+    """Yield numeric KFD proc entries. Split seam for deterministic tests."""
+    for entry in root.iterdir():
+        if entry.name.isdigit():
+            yield entry
+
+
 def probe(rocminfo, expected):
     info = subprocess.run([rocminfo], capture_output=True, text=True, timeout=15, check=True).stdout
-    import re
     # Concrete HSA agent names only; ISA compatibility names include gfx11-generic.
     targets = sorted(set(re.findall(r'^\s*Name:\s+(gfx[0-9a-f]+)\s*$', info, re.MULTILINE)))
     if targets != [expected]:
@@ -22,10 +126,12 @@ def probe(rocminfo, expected):
     root = Path('/sys/class/kfd/kfd/proc')
     if not root.is_dir() or not Path('/dev/kfd').exists():
         raise RuntimeError('KFD owner inspection unavailable')
+    topology = _topology_target_map()
+    selected = _selected_node(topology, expected)
+    selected_gpuid = _node_gpuid(selected)
     owners = []
-    for entry in root.iterdir():
-        if not entry.name.isdigit():
-            continue
+    others = []
+    for entry in _proc_entries(root):
         identity = proc_info(int(entry.name))
         if not identity:
             # The short rocminfo process can exit before KFD removes its sysfs
@@ -39,10 +145,18 @@ def probe(rocminfo, expected):
             continue
         identity['cgroup'] = Path(f"/proc/{identity['pid']}/cgroup").read_text()
         identity['executable'] = str(Path(f"/proc/{identity['pid']}/exe").readlink())
-        owners.append(identity)
-    return {'complete': True, 'owners': owners, 'capabilities': ['gpu', 'rocm', expected],
+        held = _owner_queue_gpuids(identity['pid'])
+        identity['queue_gpuids'] = sorted(held)
+        if selected_gpuid in held:
+            owners.append(identity)
+        else:
+            others.append(identity)
+    return {'complete': True, 'owners': owners, 'other_gpu_owners': others,
+            'capabilities': ['gpu', 'rocm', expected],
             'environment': {'rocminfo': rocminfo, 'targets': targets,
-                            'rocminfo_sha256': __import__('hashlib').sha256(info.encode()).hexdigest()}}
+                            'rocminfo_sha256': __import__('hashlib').sha256(info.encode()).hexdigest(),
+                            'selected_topology_node': selected,
+                            'selected_gpuid': selected_gpuid}}
 
 
 if __name__ == '__main__':
