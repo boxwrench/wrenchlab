@@ -8,7 +8,7 @@ const cases = [
   'G_conflicting_retry', 'H_orphan_quarantine', 'concurrent_duplicate_submission',
   'detached_descendant_cleanup', 'path_traversal_and_symlink',
   'exact_source_and_idempotent_ingestion', 'limits_and_immutable_flow',
-  'worker_busy_and_expired_admission', 'recovery_of_queued_admission',
+  'worker_busy_and_expired_admission', 'recovery_of_queued_admission', 'stdin_stream_deploy',
 ]
 for (const name of cases) {
   test(`CPU execution: ${name}`, { timeout: 25000 }, () => {

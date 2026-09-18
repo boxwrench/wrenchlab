@@ -25,10 +25,13 @@ class LocalTransport:
         self.lose_ack = False
 
     def deploy(self):
-        p = subprocess.run([sys.executable, '-c', DEPLOY], input=json.dumps(deployment(self.config)),
-                           text=True, capture_output=True, timeout=10)
+        from execution_protocol import canonical as _canonical
+        package = deployment(self.config)
+        manifest = _canonical(package['manifest'])
+        p = subprocess.run([sys.executable, '-c', DEPLOY, manifest.decode()],
+                           input=package['bundle'], capture_output=True, timeout=30)
         if p.returncode:
-            raise RuntimeError(p.stderr)
+            raise RuntimeError(p.stderr.decode(errors='replace'))
         return json.loads(p.stdout)
 
     def call(self, request):
@@ -289,6 +292,36 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.transport.call({'op':'inspect','job_id':'job-a'})['worker_status'],'RECOVERING')
         self.broker.action('submit','job-a'); self.wait(); self.broker.action('collect','job-a')
         self.assertEqual((self.campaign/'execution/jobs/job-a/evidence/artifact/count.txt').read_text(),'executed\n')
+
+    def test_stdin_stream_deploy(self):
+        # Deploy bundle travels over stdin, never on the command line.
+        # Corrupt bundle fails closed without touching the live worker.
+        from execution_broker import DEPLOY, deployment
+        from execution_protocol import canonical as _canonical
+        package = deployment(self.config)
+        manifest = _canonical(package['manifest'])
+        live = {p.name: p.read_bytes() for p in Path(self.config['root']).iterdir() if p.is_file()}
+        # Corrupted bytes: integrity mismatch, worker untouched.
+        bad = bytearray(package['bundle']); bad[len(bad)//2] ^= 1
+        p = subprocess.run([sys.executable, '-c', DEPLOY, manifest.decode()],
+                           input=bytes(bad), capture_output=True, timeout=30)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(b'integrity mismatch', p.stderr)
+        for name, content in live.items():
+            self.assertEqual((Path(self.config['root'])/name).read_bytes(), content)
+        # Tampered manifest hash: file mismatch, worker untouched.
+        import json as _json
+        tampered = _json.loads(manifest.decode()); tampered['files']['execution_worker.py'] = '0'*64
+        p = subprocess.run([sys.executable, '-c', DEPLOY, _json.dumps(tampered, sort_keys=True)],
+                           input=package['bundle'], capture_output=True, timeout=30)
+        self.assertNotEqual(p.returncode, 0)
+        for name, content in live.items():
+            self.assertEqual((Path(self.config['root'])/name).read_bytes(), content)
+        # Clean redeploy of identical bytes succeeds idempotently with commit pin.
+        p = subprocess.run([sys.executable, '-c', DEPLOY, manifest.decode()],
+                           input=package['bundle'], capture_output=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr.decode(errors='replace'))
+        self.assertIn('commit', _json.loads(p.stdout))
 
 
 if __name__ == '__main__':

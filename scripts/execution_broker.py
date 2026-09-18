@@ -48,7 +48,28 @@ class SSHTransport:
         return self.invoke(['python3', self.config['root'] + '/execution_worker.py', self.config['root']], payload)
 
     def deploy(self):
-        return self.invoke(['python3', '-c', DEPLOY], deployment(self.config))
+        # Bundle travels over stdin, never on the SSH command line.
+        package = deployment(self.config)
+        manifest = canonical(package['manifest'])
+        command = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                   '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
+                   '-o', 'ServerAliveCountMax=2', self.config['host'],
+                   shlex.join(['python3', '-c', DEPLOY, manifest.decode()])]
+        last = None
+        for attempt in range(2):
+            try:
+                p = subprocess.run(command, input=package['bundle'], capture_output=True, timeout=120)
+                if p.returncode == 255:
+                    raise ConnectionError('SSH transport failed; reconcile by stable ID')
+                response = json.loads(p.stdout)
+                if p.returncode or set(response) == {'error'}:
+                    raise ValueError(response.get('error', 'worker deploy failed'))
+                return response
+            except (subprocess.TimeoutExpired, ConnectionError, json.JSONDecodeError, ValueError) as exc:
+                last = exc
+                if attempt < 1:
+                    time.sleep(.5)
+        raise ConnectionError('worker deploy failed: ' + str(last))
 
 
 class LocalTransport(SSHTransport):
@@ -63,28 +84,69 @@ class LocalTransport(SSHTransport):
             raise ValueError(result.get('error', p.stderr.decode(errors='replace')))
         return result
 
+    def deploy(self):
+        # Local install uses the same manifest + stdin tar bundle, no SSH.
+        package = deployment(self.config)
+        manifest = canonical(package['manifest'])
+        p = subprocess.run([sys.executable, '-c', DEPLOY, manifest.decode()],
+                           input=package['bundle'], capture_output=True, timeout=120)
+        if p.returncode:
+            raise ValueError(p.stderr.decode(errors='replace') or 'worker deploy failed')
+        result = json.loads(p.stdout)
+        if set(result) == {'error'}:
+            raise ValueError(result.get('error', 'worker deploy failed'))
+        return result
+
 
 # Install only in a new dedicated root, or verify identical installed bytes.
 # Never overwrite an existing executor while it may own processes.
-DEPLOY = '''import sys,json,os,hashlib,tempfile
+# The installer reads a small JSON manifest on argv/stdin and the file bytes
+# as a tar stream on a second stdin pass: no source payload travels on the
+# SSH command line. Staging is verified by content hash before promotion,
+# and failed staging is removed without touching the live worker root.
+DEPLOY = '''import sys,json,os,hashlib,tempfile,tarfile,io
 from pathlib import Path
-d=json.load(sys.stdin); root=Path(d['root']); os.umask(0o077)
+manifest=json.loads(sys.argv[1]); data=sys.stdin.buffer.read()
+root=Path(manifest['root']); os.umask(0o077)
 if root.is_symlink() or root.resolve()!=root: raise ValueError('worker root must not traverse symlinks')
 if root.exists() and not (root/'state.json').exists():
     if any(root.iterdir()): raise ValueError('worker root is not empty')
-root.mkdir(parents=True,exist_ok=True)
-for name,content in d['files'].items():
-    p=root/name
-    if p.exists() and (p.is_symlink() or p.read_text()!=content): raise ValueError('installed executor differs; explicit upgrade required')
-    if not p.exists():
-        with p.open('x') as f: f.write(content); f.flush(); os.fsync(f.fileno())
-sys.path.insert(0,str(root))
-from execution_protocol import locked,save,read
-with locked(root/'state.lock'):
-    if (root/'state.json').exists():
-        if read(root/'state.json')['worker_id']!=d['worker_id']: raise ValueError('worker identity mismatch')
-    else: save(root/'state.json',{'schema_version':1,'worker_id':d['worker_id'],'status':'AVAILABLE','active_job':None,'jobs':{}})
-print(json.dumps({'worker_id':d['worker_id'],'root':str(root),'installed':True}))
+if hashlib.sha256(data).hexdigest()!=manifest['bundle_sha256']:
+    raise ValueError('deploy bundle integrity mismatch')
+stage=Path(tempfile.mkdtemp(prefix='wrenchlab-deploy-',dir=root.parent if root.parent.exists() else '/tmp'))
+try:
+    with tarfile.open(fileobj=io.BytesIO(data),mode='r') as t:
+        members=t.getmembers()
+        if sorted(m.name for m in members)!=sorted(manifest['files']):
+            raise ValueError('deploy bundle file list mismatch')
+        for m in members:
+            if not m.isfile() or m.size>1048576 or '/' in m.name or m.name.startswith('.'):
+                raise ValueError('deploy bundle member rejected: '+m.name)
+        t.extractall(stage,filter='data')
+    for name,expected in manifest['files'].items():
+        content=(stage/name).read_text()
+        if hashlib.sha256(content.encode()).hexdigest()!=expected:
+            raise ValueError('deploy file hash mismatch: '+name)
+    root.mkdir(parents=True,exist_ok=True)
+    for name in manifest['files']:
+        p=root/name
+        content=(stage/name).read_text()
+        if p.exists() and (p.is_symlink() or p.read_text()!=content):
+            raise ValueError('installed executor differs; explicit upgrade required')
+        if not p.exists():
+            with p.open('x') as f: f.write(content); f.flush(); os.fsync(f.fileno())
+    sys.path.insert(0,str(root))
+    from execution_protocol import locked,save,read
+    with locked(root/'state.lock'):
+        if (root/'state.json').exists():
+            if read(root/'state.json')['worker_id']!=manifest['worker_id']: raise ValueError('worker identity mismatch')
+        else: save(root/'state.json',{'schema_version':1,'worker_id':manifest['worker_id'],'status':'AVAILABLE','active_job':None,'jobs':{}})
+    if manifest.get('host_json'):
+        (root/'host.json').write_text(manifest['host_json'])
+finally:
+    import shutil
+    shutil.rmtree(stage,ignore_errors=True)
+print(json.dumps({'worker_id':manifest['worker_id'],'root':str(root),'installed':True,'commit':manifest.get('commit')}))
 '''
 
 
@@ -92,9 +154,30 @@ def deployment(config):
     files = {name: (HERE / name).read_text() for name in
              ('execution_protocol.py', 'execution_worker.py', 'execution_hosts.py',
               'execution_resources.py', 'execution_probe.py', 'gpu_owner_probe.py')}
+    import hashlib as _hashlib
+    import io as _io
+    import tarfile as _tarfile
+    hashes = {name: _hashlib.sha256(content.encode()).hexdigest() for name, content in files.items()}
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode='w') as t:
+        for name in sorted(files):
+            raw = files[name].encode()
+            info = _tarfile.TarInfo(name)
+            info.size = len(raw)
+            info.mode = 0o600
+            t.addfile(info, _io.BytesIO(raw))
+    bundle = buf.getvalue()
+    manifest = {'root': config['root'], 'worker_id': config['worker_id'], 'files': hashes,
+                'bundle_sha256': _hashlib.sha256(bundle).hexdigest()}
     if config['schema_version'] == 2:
-        files['host.json'] = canonical(config).decode() + '\n'
-    return {'root': config['root'], 'worker_id': config['worker_id'], 'files': files}
+        manifest['host_json'] = canonical(config).decode() + '\n'
+    try:
+        commit = subprocess.check_output(['git', '-C', str(HERE), 'rev-parse', 'HEAD'],
+                                         stderr=subprocess.DEVNULL, timeout=10).decode().strip()
+        manifest['commit'] = commit
+    except Exception:
+        pass
+    return {'manifest': manifest, 'bundle': bundle}
 
 
 def bundle_source(repo, revision):
