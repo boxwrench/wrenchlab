@@ -140,16 +140,23 @@ def _transient_owner_paths(pid):
         return None
     except RuntimeError as e:
         # A KFD proc entry can exist with no readable queue gpuids while
-        # its process is a transient client that never enqueues (rocminfo
-        # itself under concurrency: 33/40 probes saw the same short-lived
-        # PID with empty queue data). Transient means EITHER the PID/KFD
-        # entry is proven gone OR the KFD entry currently reports zero
-        # queues. A persistent entry WITH queues whose gpuids are
-        # unreadable stays fail-closed.
+        # its process is a transient client that never enqueues. Measured
+        # under 30x150 concurrency: ~120 distinct rocminfo PIDs appear in
+        # KFD, all with zero queue entries; most are already D/Z/dead or
+        # gone, but some are instantaneously R/S. Transient means EITHER
+        # the /proc PID is already unresolvable (any OSError: the process
+        # is exiting and cannot own a queue mapping) OR the PID/KFD entry
+        # is proven gone OR the KFD entry currently reports zero queues.
+        # A persistent entry WITH queues whose gpuids are unreadable
+        # stays fail-closed.
         if 'incomplete for owner' not in str(e) and 'unavailable for owner' not in str(e):
             raise
         try:
-            pid_gone = not Path(f'/proc/{pid}').exists()
+            try:
+                Path(f'/proc/{pid}/stat').read_text()
+                proc_gone = False
+            except OSError:
+                proc_gone = True
             kfd_dir = Path(f'/sys/class/kfd/kfd/proc/{pid}')
             kfd_gone = not kfd_dir.exists()
             try:
@@ -160,7 +167,7 @@ def _transient_owner_paths(pid):
                 return None
         except OSError:
             raise
-        if not ((pid_gone and kfd_gone) or no_queues):
+        if not (proc_gone or (kfd_gone and not Path(f'/proc/{pid}').exists()) or no_queues):
             raise
         return None
     return cgroup, executable, held
