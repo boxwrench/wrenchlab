@@ -122,21 +122,28 @@ def _transient_owner_paths(pid):
     """Read the per-PID /proc paths for one KFD owner candidate.
 
     Returns None when the process exited between discovery and these
-    reads (FileNotFoundError on /proc/<pid>/...). Only disappearance
-    is transient; permission errors, malformed data, and queue/topology
-    failures stay fail-closed in their own helpers.
+    reads (disappearance on /proc/<pid>/...: FileNotFoundError, or
+    ProcessLookupError when the PID is a zombie/reaped mid-read).
+    Only disappearance is transient; permission errors, malformed data,
+    and queue/topology failures stay fail-closed in their own helpers.
     """
     try:
         cgroup = Path(f'/proc/{pid}/cgroup').read_text()
     except FileNotFoundError:
         return None
+    except ProcessLookupError:
+        return None
     try:
         executable = str(Path(f'/proc/{pid}/exe').readlink())
     except FileNotFoundError:
         return None
+    except ProcessLookupError:
+        return None
     try:
         held = _owner_queue_gpuids(pid)
     except FileNotFoundError:
+        return None
+    except ProcessLookupError:
         return None
     except RuntimeError as e:
         # A KFD proc entry can exist with no readable queue gpuids while
