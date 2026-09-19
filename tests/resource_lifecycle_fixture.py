@@ -227,6 +227,134 @@ class ResourceLifecycle(ExecutionTests):
             for p in started:
                 p.stop()
 
+    def test_transient_owner_disappearance_ignored(self):
+        # A PID that exits between KFD discovery and /proc reads is
+        # transient, not a probe failure. Only FileNotFoundError on the
+        # per-PID paths is transient; permission errors stay fail-closed.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import subprocess
+        from gpu_owner_probe import probe
+        import gpu_owner_probe as gop
+        output = '  Name: gfx1201\n'
+        run = subprocess.CompletedProcess([], 0, output, '')
+        topo = {'7': 120001, '9': 110000}
+        gpuids = {'7': 2277, '9': 23276}
+        def identity(pid):
+            return {'pid': pid, 'state': 'S', 'ppid': 1, 'pgid': 1, 'ticks': '1', 'boot_id': 'b'}
+        def entries(*args):
+            return [SimpleNamespace(name='101', exists=lambda: False),
+                    SimpleNamespace(name='202', exists=lambda: True)]
+        import pathlib as _pl
+        real_exists = _pl.Path.exists
+        def fake_exists(self):
+            # SimpleNamespace KFD entries carry their own exists(); the
+            # only real Path.exists call in this path is /dev/kfd. All
+            # other KFD-entry liveness checks use the namespace method.
+            if str(self) == '/dev/kfd':
+                return True
+            if type(self) is _pl.Path and str(self).startswith('/sys/class/kfd'):
+                return real_exists(self)
+            return False
+        def base():
+            return [patch('gpu_owner_probe.subprocess.run', return_value=run),
+                    patch('gpu_owner_probe._topology_target_map', return_value=dict(topo)),
+                    patch('gpu_owner_probe._node_gpuid', side_effect=lambda n: gpuids[n]),
+                    patch('gpu_owner_probe.proc_info', side_effect=identity),
+                    patch('gpu_owner_probe._proc_entries', side_effect=entries),
+                    patch.object(_pl.Path, 'is_dir', return_value=True),
+                    patch.object(_pl.Path, 'exists', fake_exists)]
+        # The real _transient_owner_paths is exercised below; patch its
+        # lowest-level seams instead of the helper itself.
+        def live_paths(pid):
+            return {2277} if pid == 101 else {23276}
+        low = [patch('pathlib.Path.read_text', return_value='x'),
+               patch('pathlib.Path.readlink', return_value='/bin/true'),
+               patch('gpu_owner_probe._owner_queue_gpuids', side_effect=live_paths)]
+        real_helper = gop._transient_owner_paths
+        # 1: helper passes a live owner through unchanged.
+        self.assertTrue(callable(real_helper))
+        patches = base() + low
+        for p in patches:
+            p.start()
+        try:
+            result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual([o['pid'] for o in result['owners']], [101])
+        self.assertEqual([o['pid'] for o in result['other_gpu_owners']], [202])
+        # 3-5: disappearance at cgroup, exe, or queue stage is transient.
+        # Simulate at the seam level: read_text/readlink/queue each raise
+        # FileNotFoundError for the vanishing PID only.
+        for stage in ('read_text', 'readlink', 'queues'):
+            def vanishing_read_text(self, _stage=stage):
+                if _stage == 'read_text' and '101' in str(self):
+                    raise FileNotFoundError(str(self))
+                return 'x'
+            def vanishing_readlink(self, _stage=stage):
+                if _stage == 'readlink' and '101' in str(self):
+                    raise FileNotFoundError(str(self))
+                return '/bin/true'
+            def vanishing_queues(pid, _stage=stage):
+                if _stage == 'queues' and pid == 101:
+                    raise FileNotFoundError(f'/proc/101/queues')
+                return {2277} if pid == 101 else {23276}
+            patches = base() + [patch('pathlib.Path.read_text', vanishing_read_text),
+                                patch('pathlib.Path.readlink', vanishing_readlink),
+                                patch('gpu_owner_probe._owner_queue_gpuids', side_effect=vanishing_queues)]
+            for p in patches:
+                p.start()
+            try:
+                result = probe('/fake/rocminfo', 'gfx1201')
+            finally:
+                for p in patches:
+                    p.stop()
+            self.assertEqual(result['owners'], [], msg=f'stage {stage}')
+            self.assertEqual([o['pid'] for o in result['other_gpu_owners']], [202], msg=f'stage {stage}')
+        # 2b: disappearance before identity read is already transient.
+        # Both entries vanish: their namespace exists() is False.
+        both_gone = [SimpleNamespace(name='101', exists=lambda: False),
+                     SimpleNamespace(name='202', exists=lambda: False)]
+        patches = base() + [patch('pathlib.Path.read_text', return_value='x'),
+                            patch('pathlib.Path.readlink', return_value='/bin/true'),
+                            patch('gpu_owner_probe._owner_queue_gpuids',
+                                  side_effect=lambda pid: {2277}),
+                            patch('gpu_owner_probe._proc_entries', return_value=both_gone)]
+        for p in patches:
+            p.start()
+        try:
+            with patch('gpu_owner_probe.proc_info', return_value=None):
+                result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(result['owners'], [])
+        self.assertEqual(result['other_gpu_owners'], [])
+        # 6: permission errors are not disappearance; still fail closed.
+        patches = base() + [patch('pathlib.Path.read_text', side_effect=PermissionError('denied'))]
+        for p in patches:
+            p.start()
+        try:
+            with self.assertRaises(PermissionError):
+                probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        # 7: a real owner on the selected GPU still blocks.
+        patches = base() + [patch('pathlib.Path.read_text', return_value='x'),
+                            patch('pathlib.Path.readlink', return_value='/bin/true'),
+                            patch('gpu_owner_probe._owner_queue_gpuids',
+                                  side_effect=lambda pid: {2277})]
+        for p in patches:
+            p.start()
+        try:
+            result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(sorted(o['pid'] for o in result['owners']), [101, 202])
+
     def test_cross_worker_exclusive_admission(self):
         self.prepare('sleep'); self.broker.action('submit', 'job-a'); self.wait(command=True)
         config = copy.deepcopy(self.config)

@@ -118,6 +118,29 @@ def _proc_entries(root):
             yield entry
 
 
+def _transient_owner_paths(pid):
+    """Read the per-PID /proc paths for one KFD owner candidate.
+
+    Returns None when the process exited between discovery and these
+    reads (FileNotFoundError on /proc/<pid>/...). Only disappearance
+    is transient; permission errors, malformed data, and queue/topology
+    failures stay fail-closed in their own helpers.
+    """
+    try:
+        cgroup = Path(f'/proc/{pid}/cgroup').read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        executable = str(Path(f'/proc/{pid}/exe').readlink())
+    except FileNotFoundError:
+        return None
+    try:
+        held = _owner_queue_gpuids(pid)
+    except FileNotFoundError:
+        return None
+    return cgroup, executable, held
+
+
 def probe(rocminfo, expected):
     info = subprocess.run([rocminfo], capture_output=True, text=True, timeout=15, check=True,
                             env={**os.environ, 'ROCR_VISIBLE_DEVICES': os.environ.get(
@@ -146,9 +169,20 @@ def probe(rocminfo, expected):
             if entry.exists():
                 raise RuntimeError('GPU owner process identity unavailable: ' + entry.name)
             continue
-        identity['cgroup'] = Path(f"/proc/{identity['pid']}/cgroup").read_text()
-        identity['executable'] = str(Path(f"/proc/{identity['pid']}/exe").readlink())
-        held = _owner_queue_gpuids(identity['pid'])
+        paths = _transient_owner_paths(identity['pid'])
+        if paths is None:
+            # Any short-lived KFD client (rocminfo included) can exit
+            # after its identity was read but before these paths are
+            # inspected. A disappeared PID holds no queues; skip it and
+            # keep evaluating the rest. Permission errors and malformed
+            # state still raise inside the helper.
+            end = time.monotonic() + 1
+            while entry.exists() and time.monotonic() < end:
+                time.sleep(.02)
+            if entry.exists():
+                raise RuntimeError('GPU owner process inspection raced: ' + entry.name)
+            continue
+        identity['cgroup'], identity['executable'], held = paths[0], paths[1], paths[2]
         identity['queue_gpuids'] = sorted(held)
         if selected_gpuid in held:
             owners.append(identity)
