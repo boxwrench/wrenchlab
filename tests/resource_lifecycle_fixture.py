@@ -351,11 +351,21 @@ class ResourceLifecycle(ExecutionTests):
             if str(self).startswith('/proc/') or str(self).startswith('/sys/class/kfd'):
                 return True
             return real_exists2(self)
+        def queues_101_only_fail(pid):
+            if pid == 101:
+                raise RuntimeError('KFD queue data incomplete for owner: 101')
+            return {23276}
+        def fake_is_dir2(self):
+            # PID 101's queues dir exists but is non-empty (persistent
+            # owner with unreadable gpuids): fail closed. PID 202 has
+            # normal queue data via the side effect above.
+            return True
         patches = base() + [patch('pathlib.Path.read_text', return_value='x'),
                             patch('pathlib.Path.readlink', return_value='/bin/true'),
-                            patch('gpu_owner_probe._owner_queue_gpuids',
-                                  side_effect=RuntimeError('KFD queue data incomplete for owner: 101')),
-                            patch.object(_pl2.Path, 'exists', fake_exists2)]
+                            patch('gpu_owner_probe._owner_queue_gpuids', side_effect=queues_101_only_fail),
+                            patch.object(_pl2.Path, 'exists', fake_exists2),
+                            patch.object(_pl2.Path, 'is_dir', fake_is_dir2),
+                            patch.object(_pl2.Path, 'iterdir', lambda self: iter([object()]))]
         for p in patches:
             p.start()
         try:

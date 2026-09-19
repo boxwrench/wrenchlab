@@ -139,18 +139,28 @@ def _transient_owner_paths(pid):
     except FileNotFoundError:
         return None
     except RuntimeError as e:
-        # A KFD proc entry whose queue data vanishes mid-read belongs to
-        # an exiting process, not a persistent owner. Confirm proven
-        # disappearance (both the PID and its KFD sysfs entry gone)
-        # before treating it as transient.
+        # A KFD proc entry can exist with no readable queue gpuids while
+        # its process is a transient client that never enqueues (rocminfo
+        # itself under concurrency: 33/40 probes saw the same short-lived
+        # PID with empty queue data). Transient means EITHER the PID/KFD
+        # entry is proven gone OR the KFD entry currently reports zero
+        # queues. A persistent entry WITH queues whose gpuids are
+        # unreadable stays fail-closed.
         if 'incomplete for owner' not in str(e) and 'unavailable for owner' not in str(e):
             raise
         try:
             pid_gone = not Path(f'/proc/{pid}').exists()
-            kfd_gone = not Path(f'/sys/class/kfd/kfd/proc/{pid}').exists()
+            kfd_dir = Path(f'/sys/class/kfd/kfd/proc/{pid}')
+            kfd_gone = not kfd_dir.exists()
+            try:
+                queues_dir = kfd_dir / 'queues'
+                no_queues = queues_dir.is_dir() and not any(queues_dir.iterdir())
+            except FileNotFoundError:
+                # Queues dir vanished mid-check: same transient class.
+                return None
         except OSError:
             raise
-        if not (pid_gone and kfd_gone):
+        if not ((pid_gone and kfd_gone) or no_queues):
             raise
         return None
     return cgroup, executable, held
