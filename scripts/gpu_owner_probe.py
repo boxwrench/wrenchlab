@@ -161,7 +161,13 @@ def _transient_owner_paths(pid):
             kfd_gone = not kfd_dir.exists()
             try:
                 queues_dir = kfd_dir / 'queues'
-                no_queues = queues_dir.is_dir() and not any(queues_dir.iterdir())
+                # Missing queues dir on a present KFD entry is the same
+                # transient class: the client never enqueued (measured:
+                # 'unavailable for owner' under concurrency). Present-but-
+                # empty also transient. Only non-empty-with-unreadable-
+                # gpuids stays fail-closed.
+                no_queues = (not queues_dir.exists()) or (
+                    queues_dir.is_dir() and not any(queues_dir.iterdir()))
             except FileNotFoundError:
                 # Queues dir vanished mid-check: same transient class.
                 return None

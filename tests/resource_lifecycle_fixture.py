@@ -212,18 +212,34 @@ class ResourceLifecycle(ExecutionTests):
              patch('gpu_owner_probe._topology_target_map', return_value={'7': 120001, '8': 120001}):
             with self.assertRaisesRegex(RuntimeError, 'ambiguously'):
                 probe('/fake/rocminfo', 'gfx1201')
-        # Unreadable queue data fails closed, never reads as absent.
+        # Unreadable queue data fails closed when the entry persists WITH
+        # queues whose gpuids are unreadable: queues dir exists, non-empty.
+        import pathlib as _pl0
+        def fake_exists0(self):
+            s = str(self)
+            if s == '/dev/kfd':
+                return True
+            if s.startswith('/proc/') or s.startswith('/sys/class/kfd'):
+                return True
+            return _pl0.Path.exists(self)
         patches = ctx(RuntimeError('KFD queue data incomplete for owner: 101'))
         for p in patches:
             if 'queue_gpuids' not in str(p):
                 p.start()
         started = [p for p in patches if 'queue_gpuids' not in str(p)]
+        extra = [patch.object(_pl0.Path, 'exists', fake_exists0),
+                 patch.object(_pl0.Path, 'is_dir', lambda self: True),
+                 patch.object(_pl0.Path, 'iterdir', lambda self: iter([object()]))]
+        for p in extra:
+            p.start()
         try:
             with patch('gpu_owner_probe._owner_queue_gpuids',
                        side_effect=RuntimeError('KFD queue data incomplete for owner: 101')):
                 with self.assertRaisesRegex(RuntimeError, 'queue data'):
                     probe('/fake/rocminfo', 'gfx1201')
         finally:
+            for p in extra:
+                p.stop()
             for p in started:
                 p.stop()
 
