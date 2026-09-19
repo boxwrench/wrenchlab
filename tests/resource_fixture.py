@@ -239,6 +239,19 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(adapter.stop_calls, [])
         self.assertEqual(adapter.start_calls, [])
 
+    def test_adapter_inherits_configured_gpu_environment(self):
+        # The sanitized probe env must carry the declared GPU selection;
+        # otherwise admission inspects unmasked hardware and disagrees
+        # with qualification. Unsupported keys fail closed at construction.
+        from execution_resources import SystemAdapter
+        adapter = SystemAdapter(self.host)
+        self.assertEqual(adapter.env.get("HIP_VISIBLE_DEVICES"), "0")
+        self.assertEqual(adapter.env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+        bad = copy.deepcopy(self.host)
+        bad["resources"]["gpu"]["environment"] = {"CUDA_VISIBLE_DEVICES": "0"}
+        with self.assertRaisesRegex(ValueError, "unsupported GPU environment key"):
+            SystemAdapter(bad)
+
 
 if __name__ == "__main__":
     unittest.main()

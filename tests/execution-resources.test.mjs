@@ -18,6 +18,7 @@ const cases = [
   'old_manager_cannot_release_newer_reservation',
   'malformed_requirements_rejected',
   'probe_failure_quarantines_before_mutation',
+  'adapter_inherits_configured_gpu_environment',
 ]
 
 for (const name of cases) {

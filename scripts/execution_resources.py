@@ -31,6 +31,13 @@ class SystemAdapter:
                     'HOME': pwd.getpwuid(os.getuid()).pw_dir,
                     'XDG_RUNTIME_DIR': f'/run/user/{os.getuid()}',
                     'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{os.getuid()}/bus'}
+        # The configured GPU selection must reach the probe; otherwise the probe
+        # inspects unmasked hardware and admission disagrees with qualification.
+        for key, value in self.resource.get('environment', {}).items():
+            if not isinstance(value, str) or key not in (
+                    'HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES', 'LD_LIBRARY_PATH'):
+                raise ValueError('unsupported GPU environment key: ' + str(key))
+            self.env[key] = value
 
     def run(self, argv, check=True, timeout=15):
         helper = Path(__file__).with_name('execution_probe.py')
