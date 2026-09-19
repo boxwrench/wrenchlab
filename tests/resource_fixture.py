@@ -239,6 +239,47 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(adapter.stop_calls, [])
         self.assertEqual(adapter.start_calls, [])
 
+    def test_snapshot_retries_transient_probe_failure(self):
+        # Workload-reliable, safety intact: a transient probe/helper
+        # failure under load re-samples (3 attempts); persistent failure
+        # still raises.
+        from execution_resources import SystemAdapter
+        calls = {'n': 0}
+        class Stub:
+            def _snapshot_once(self):
+                calls['n'] += 1
+                if calls['n'] < 3:
+                    raise RuntimeError('configured probe/service command failed: /usr/bin/python3')
+                return {'ok': True}
+        result = SystemAdapter.snapshot(Stub())
+        self.assertEqual(result, {'ok': True})
+        self.assertEqual(calls['n'], 3)
+        # Persistent transient-class failure still raises after 3 tries.
+        class AlwaysBad:
+            def _snapshot_once(self):
+                calls['n'] += 1
+                raise RuntimeError('configured helper failed/cleanup unverified: /usr/bin/python3')
+        before = calls['n']
+        with self.assertRaisesRegex(RuntimeError, 'configured helper failed'):
+            SystemAdapter.snapshot(AlwaysBad())
+        self.assertEqual(calls['n'] - before, 3)
+
+    def test_snapshot_never_retries_unknown_owner(self):
+        # Unknown owners and incomplete inspection quarantine immediately,
+        # single attempt, no re-sample.
+        from execution_resources import SystemAdapter
+        for msg in ('unknown GPU owner during job; left untouched',
+                    'resource owner inspection incomplete',
+                    'CONFLICT: unknown resource owner; left untouched'):
+            calls = {'n': 0}
+            class Stub:
+                def _snapshot_once(self):
+                    calls['n'] += 1
+                    raise RuntimeError(msg)
+            with self.assertRaises(RuntimeError):
+                SystemAdapter.snapshot(Stub())
+            self.assertEqual(calls['n'], 1)
+
     def test_adapter_inherits_configured_gpu_environment(self):
         # The sanitized probe env must carry the declared GPU selection;
         # otherwise admission inspects unmasked hardware and disagrees

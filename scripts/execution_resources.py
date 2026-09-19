@@ -103,14 +103,21 @@ class SystemAdapter:
                 'environment': data.get('environment', {}), 'timestamp': now()}
 
     def snapshot(self):
-        # KFD can retain a just-exited transient client while /proc is already
-        # changing. Re-sample that narrow race; persistent disagreement stays
-        # fail-closed and is quarantined by the caller.
+        # Single-experiment reliability: a transient probe/helper failure
+        # under GPU load (rocminfo contention while the workload holds the
+        # device) must not kill the run. Re-sample bounded times; persistent
+        # disagreement stays fail-closed and is quarantined by the caller.
+        # Unknown owners, capability mismatch, and incomplete inspection are
+        # never retried here.
         for attempt in range(3):
             try:
                 return self._snapshot_once()
             except RuntimeError as exc:
-                if 'resource owner changed during inspection' not in str(exc) or attempt == 2:
+                msg = str(exc)
+                transient = ('resource owner changed during inspection' in msg
+                             or 'configured probe/service command failed' in msg
+                             or 'configured helper failed/cleanup unverified' in msg)
+                if not transient or attempt == 2:
                     raise
                 time.sleep(.15 * (attempt + 1))
 

@@ -18,6 +18,8 @@ const cases = [
   'old_manager_cannot_release_newer_reservation',
   'malformed_requirements_rejected',
   'probe_failure_quarantines_before_mutation',
+  'snapshot_retries_transient_probe_failure',
+  'snapshot_never_retries_unknown_owner',
   'adapter_inherits_configured_gpu_environment',
 ]
 
