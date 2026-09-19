@@ -249,7 +249,21 @@ class ResourceManager:
     def observe(self, owned_process_identities):
         with locked(self.lock):
             self.load_owned()
-            snap = self.adapter.snapshot()
+            try:
+                snap = self.adapter.snapshot()
+            except RuntimeError as exc:
+                # Single-experiment reliability: a transient probe/helper
+                # failure on one 1s observe tick must not kill the run.
+                # The tick is skipped; the next tick re-checks. Unknown
+                # owners still quarantine, never skip.
+                msg = str(exc)
+                if ('configured probe/service command failed' not in msg
+                        and 'configured helper failed/cleanup unverified' not in msg):
+                    raise
+                self.receipt['last_observed_at'] = now()
+                self.receipt['skipped_observations'] = self.receipt.get('skipped_observations', 0) + 1
+                self.persist()
+                return
             allowed = {(o['pid'], o['ticks'], o['boot_id']) for o in owned_process_identities}
             if any((o['pid'], o['ticks'], o['boot_id']) not in allowed for o in snap['owners']):
                 self.quarantine('unknown resource owner appeared during execution')

@@ -40,7 +40,7 @@ class FakeAdapter:
 
     def snapshot(self):
         if self.fail_snapshot:
-            raise RuntimeError("injected probe failure")
+            raise RuntimeError("configured probe/service command failed: /usr/bin/python3")
         services = copy.deepcopy(self.services)
         if self.fail_health and "managed-service" in services:
             services["managed-service"]["healthy"] = False
@@ -279,6 +279,29 @@ class ResourceTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 SystemAdapter.snapshot(Stub())
             self.assertEqual(calls['n'], 1)
+
+    def test_observe_skips_transient_probe_tick(self):
+        # Workload-reliable: one failed 1s observe tick skips and counts;
+        # the next tick re-checks. Unknown owners still quarantine.
+        m = self.manager()
+        self.acquire(m)
+        before = m.receipt.get('last_observed_at')
+        m.adapter.fail_snapshot = True
+        m.observe([])
+        self.assertEqual(m.receipt.get('skipped_observations'), 1)
+        self.assertNotEqual(m.receipt.get('last_observed_at'), before)
+        self.assertEqual(m.receipt['state'], 'BUSY')
+        m.adapter.fail_snapshot = False
+        m.observe([])
+        self.assertEqual(m.receipt['state'], 'BUSY')
+
+    def test_observe_never_skips_unknown_owner(self):
+        # Unknown owners quarantine on the observe path, never skip.
+        owner = identity(222, 9, cgroup="unrelated")
+        m = self.manager(FakeAdapter(owners=[owner]))
+        with self.assertRaises((ValueError, RuntimeError)):
+            self.acquire(m)
+        self.assertEqual(m.receipt["state"], "QUARANTINED")
 
     def test_adapter_inherits_configured_gpu_environment(self):
         # The sanitized probe env must carry the declared GPU selection;

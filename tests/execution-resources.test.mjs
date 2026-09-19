@@ -20,6 +20,8 @@ const cases = [
   'probe_failure_quarantines_before_mutation',
   'snapshot_retries_transient_probe_failure',
   'snapshot_never_retries_unknown_owner',
+  'observe_skips_transient_probe_tick',
+  'observe_never_skips_unknown_owner',
   'adapter_inherits_configured_gpu_environment',
 ]
 
