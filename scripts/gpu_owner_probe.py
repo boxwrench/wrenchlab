@@ -11,6 +11,7 @@ reported as other_gpu_owners for diagnostics and do not block acquisition.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -118,7 +119,9 @@ def _proc_entries(root):
 
 
 def probe(rocminfo, expected):
-    info = subprocess.run([rocminfo], capture_output=True, text=True, timeout=15, check=True).stdout
+    info = subprocess.run([rocminfo], capture_output=True, text=True, timeout=15, check=True,
+                            env={**os.environ, 'ROCR_VISIBLE_DEVICES': os.environ.get(
+                                'ROCR_VISIBLE_DEVICES', '1')}).stdout
     # Concrete HSA agent names only; ISA compatibility names include gfx11-generic.
     targets = sorted(set(re.findall(r'^\s*Name:\s+(gfx[0-9a-f]+)\s*$', info, re.MULTILINE)))
     if targets != [expected]:
