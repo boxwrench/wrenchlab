@@ -138,6 +138,21 @@ def _transient_owner_paths(pid):
         held = _owner_queue_gpuids(pid)
     except FileNotFoundError:
         return None
+    except RuntimeError as e:
+        # A KFD proc entry whose queue data vanishes mid-read belongs to
+        # an exiting process, not a persistent owner. Confirm proven
+        # disappearance (both the PID and its KFD sysfs entry gone)
+        # before treating it as transient.
+        if 'incomplete for owner' not in str(e) and 'unavailable for owner' not in str(e):
+            raise
+        try:
+            pid_gone = not Path(f'/proc/{pid}').exists()
+            kfd_gone = not Path(f'/sys/class/kfd/kfd/proc/{pid}').exists()
+        except OSError:
+            raise
+        if not (pid_gone and kfd_gone):
+            raise
+        return None
     return cgroup, executable, held
 
 

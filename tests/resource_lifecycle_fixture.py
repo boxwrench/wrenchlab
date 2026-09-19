@@ -341,6 +341,61 @@ class ResourceLifecycle(ExecutionTests):
         finally:
             for p in patches:
                 p.stop()
+        # 6b: persistent incomplete queue data still fails closed when the
+        # PID and its KFD entry are both still present.
+        import pathlib as _pl2
+        real_exists2 = _pl2.Path.exists
+        def fake_exists2(self):
+            if str(self) == '/dev/kfd':
+                return True
+            if str(self).startswith('/proc/') or str(self).startswith('/sys/class/kfd'):
+                return True
+            return real_exists2(self)
+        patches = base() + [patch('pathlib.Path.read_text', return_value='x'),
+                            patch('pathlib.Path.readlink', return_value='/bin/true'),
+                            patch('gpu_owner_probe._owner_queue_gpuids',
+                                  side_effect=RuntimeError('KFD queue data incomplete for owner: 101')),
+                            patch.object(_pl2.Path, 'exists', fake_exists2)]
+        for p in patches:
+            p.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'queue data'):
+                probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        # 6c: vanishing queue data is transient when both the PID and its
+        # KFD entry are proven gone. The KFD proc entries for this case
+        # report gone via their namespace exists().
+        gone_entries = [SimpleNamespace(name='101', exists=lambda: False),
+                        SimpleNamespace(name='202', exists=lambda: True)]
+        real_exists3 = _pl2.Path.exists
+        def fake_exists3(self):
+            s = str(self)
+            if s == '/dev/kfd':
+                return True
+            if s == '/sys/class/kfd/kfd/proc':
+                return True
+            if s.startswith('/proc/101') or s.startswith('/sys/class/kfd/kfd/proc/101'):
+                return False
+            return real_exists3(self)
+        def queues_101_only(pid):
+            if pid == 101:
+                raise RuntimeError('KFD queue data incomplete for owner: 101')
+            return {23276}
+        patches = base() + [patch('pathlib.Path.read_text', return_value='x'),
+                            patch('pathlib.Path.readlink', return_value='/bin/true'),
+                            patch('gpu_owner_probe._owner_queue_gpuids', side_effect=queues_101_only),
+                            patch('gpu_owner_probe._proc_entries', return_value=gone_entries),
+                            patch.object(_pl2.Path, 'exists', fake_exists3)]
+        for p in patches:
+            p.start()
+        try:
+            result = probe('/fake/rocminfo', 'gfx1201')
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(result['owners'], [])
         # 7: a real owner on the selected GPU still blocks.
         patches = base() + [patch('pathlib.Path.read_text', return_value='x'),
                             patch('pathlib.Path.readlink', return_value='/bin/true'),
